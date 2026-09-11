@@ -1,7 +1,7 @@
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from experiments.niah_recall import build_policy_cache
+from experiments.niah_recall import build_policy_cache, make_strong_needle_prompt
 
 
 def test_policy_cache_changes_next_token_logits_for_same_prefix():
@@ -56,3 +56,13 @@ def test_streamingllm_cache_keeps_sink_tokens_plus_recent_window():
         cache.layers[0].keys[:, :, :4, :].sum(dim=(0, 1, 3)),
         model(input_ids=input_ids, use_cache=True).past_key_values.layers[0].keys[:, :, :4, :].sum(dim=(0, 1, 3)),
     )
+
+
+def test_make_strong_needle_prompt_uses_unique_secret_phrase_and_exact_instruction():
+    needle_fact = 'The exact secret is BAKED-42.'
+    prompt = make_strong_needle_prompt(context_length=32, needle_depth=18, needle_fact=needle_fact)
+
+    assert 'BAKED-42' in prompt
+    assert 'Return only the exact sentence' in prompt
+    assert 'Sentence 18' in prompt or 'Sentence 18:' in prompt
+    assert 'sentence contains the exact keyphrase' in prompt.lower()

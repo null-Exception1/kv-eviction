@@ -68,6 +68,35 @@ def make_needle_prompt(context_length: int, needle_depth: int, needle_fact: str)
     return prompt
 
 
+def make_strong_needle_prompt(context_length: int, needle_depth: int, needle_fact: str):
+    """Build a stronger NIAH-style prompt with deep secret placement and decoy-heavy context.
+
+    The key idea is to force the model to retrieve a unique secret phrase from a long
+    sentence list while making the instruction strict enough that general reasoning is
+    not rewarded over exact retrieval.
+    """
+    fact_lines = []
+    for i in range(max(8, context_length)):
+        if i == needle_depth:
+            fact_lines.append(f'Sentence {i}: {needle_fact}')
+        elif i % 5 == 0:
+            fact_lines.append(f'Sentence {i}: the color of the sky can be described as blue.')
+        elif i % 3 == 0:
+            fact_lines.append(f'Sentence {i}: the capital of France is Paris and the answer is not the secret fact.')
+        else:
+            fact_lines.append(f'Sentence {i}: the answer is not the secret fact.')
+
+    context = '\n'.join(fact_lines[:context_length])
+    return (
+        'You are given a long list of sentences. Your task is exact retrieval only.\n'
+        'Return only the exact sentence that contains the unique keyphrase.\n'
+        'Do not paraphrase, summarize, or explain. Do not answer with a sentence number. ' 
+        'Return exactly the matching sentence text.\n'
+        f'{context}\n'
+        'Question: Which sentence contains the exact keyphrase? Reply with only the exact sentence text.'
+    )
+
+
 def build_policy_cache(
     model: AutoModelForCausalLM,
     input_ids: torch.Tensor,
@@ -150,7 +179,7 @@ def generate_completion(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, p
 
 
 def evaluate_condition(model, tokenizer, condition: str, context_length: int, needle_depth: int, needle_fact: str, window_size: int = 64):
-    prompt = make_needle_prompt(context_length, needle_depth, needle_fact)
+    prompt = make_strong_needle_prompt(context_length, needle_depth, needle_fact)
     base_ids = tokenizer(prompt, return_tensors='pt')['input_ids'].to(next(model.parameters()).device)
     k_proj = capture_attention_k(model, base_ids)
     freqs = precompute_rope_freqs(2048, k_proj.shape[-1], device=torch.device('cpu'))
@@ -211,7 +240,7 @@ def benchmark_latency(
     settings, and cache policies while using a short warmup phase to reduce the
     effect of first-run initialization noise.
     """
-    prompt = make_needle_prompt(context_length, needle_depth, needle_fact)
+    prompt = make_strong_needle_prompt(context_length, needle_depth, needle_fact)
     base_ids = tokenizer(prompt, return_tensors='pt')['input_ids'].to(next(model.parameters()).device)
 
     if warmup > 0:
@@ -278,8 +307,8 @@ def run_suite(output_path: str | None = None, context_lengths: list[int] | None 
     model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32, device_map='cpu')
     model.eval()
 
-    context_lengths = context_lengths or [64, 96]
-    depths = depths or [0, 1, 2]
+    context_lengths = context_lengths or [16, 24, 32, 48, 64]
+    depths = depths or [2, 4, 8, 12, 16]
     needle_fact = 'The exact secret is BAKED-42.'
     rows = []
 
