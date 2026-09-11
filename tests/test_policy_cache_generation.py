@@ -34,3 +34,25 @@ def test_policy_cache_changes_next_token_logits_for_same_prefix():
     ).logits
 
     assert not torch.allclose(stream_logits, rsqr_logits, atol=1e-5, rtol=1e-3)
+
+
+def test_streamingllm_cache_keeps_sink_tokens_plus_recent_window():
+    model_name = 'Qwen/Qwen2.5-0.5B-Instruct'
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32, device_map='cpu')
+    model.eval()
+
+    prompt = ' '.join(f'fact {i}: the answer is not the secret fact.' for i in range(20))
+    input_ids = tokenizer(prompt, return_tensors='pt')['input_ids']
+    cache = build_policy_cache(model, input_ids, 'streamingllm', window_size=12, sink_size=4, survivor_every=8)
+
+    kept_len = cache.layers[0].keys.shape[-2]
+    assert kept_len == 16, f'expected 16 kept positions (4 sink + 12 recent), got {kept_len}'
+
+    # The first four positions are kept as the sink set and the last twelve are the recent window.
+    kept_positions = list(range(0, 4)) + list(range(len(input_ids[0]) - 12, len(input_ids[0])))
+    assert cache.layers[0].keys.shape[-2] == len(kept_positions)
+    assert torch.equal(
+        cache.layers[0].keys[:, :, :4, :].sum(dim=(0, 1, 3)),
+        model(input_ids=input_ids, use_cache=True).past_key_values.layers[0].keys[:, :, :4, :].sum(dim=(0, 1, 3)),
+    )

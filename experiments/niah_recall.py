@@ -63,8 +63,20 @@ def make_needle_prompt(context_length: int, needle_depth: int, needle_fact: str)
     return prompt
 
 
-def build_policy_cache(model: AutoModelForCausalLM, input_ids: torch.Tensor, condition: str, window_size: int = 64, survivor_every: int = 8):
-    """Return a policy-specific cache that changes the next-token logits for the same prompt prefix."""
+def build_policy_cache(
+    model: AutoModelForCausalLM,
+    input_ids: torch.Tensor,
+    condition: str,
+    window_size: int = 64,
+    sink_size: int = 4,
+    survivor_every: int = 8,
+):
+    """Return a policy-specific cache for the same prompt prefix.
+
+    StreamingLLM keeps a fixed sink prefix plus the most recent tokens in the
+    sliding window. RSQR keeps every survivor token via the raw-survivor index
+    map, which is the same mechanism the rest of the repo uses.
+    """
     with torch.no_grad():
         full_cache = model(input_ids=input_ids, use_cache=True).past_key_values
     cache = copy.deepcopy(full_cache)
@@ -73,8 +85,11 @@ def build_policy_cache(model: AutoModelForCausalLM, input_ids: torch.Tensor, con
         values = layer.values
         seq_len = keys.shape[-2]
         if condition == 'streamingllm':
-            start = max(0, seq_len - window_size)
-            keep = slice(start, seq_len)
+            if seq_len <= sink_size + window_size:
+                keep = list(range(seq_len))
+            else:
+                recent_start = max(sink_size, seq_len - window_size)
+                keep = list(range(0, min(sink_size, seq_len))) + list(range(recent_start, seq_len))
         elif condition == 'rsqr':
             keep = list(range(0, seq_len, survivor_every))
             if not keep:
