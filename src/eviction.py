@@ -43,21 +43,25 @@ class EvictionManager:
             return {'rotated': [], 'index_map': index_map.global_to_logical, 'window_state': window_state}
 
         compacted = index_map.compact([global_pos for _, _, global_pos in survivors])
+        raw_keys = [raw_key for _, raw_key, _ in survivors]
+        logical_positions = torch.tensor([
+            float(compacted[global_pos])
+            for _, _, global_pos in survivors
+        ], dtype=torch.float32, device=raw_keys[0].device)
+
+        batched_keys = torch.stack(raw_keys, dim=0)
+        freqs = self.freqs.to(batched_keys.device)
+        rotated_batched = apply_rope(batched_keys, logical_positions, freqs)
+
         rotated = []
-        for token_id, raw_key, global_pos in survivors:
+        for idx, (token_id, raw_key, global_pos) in enumerate(survivors):
             logical_pos = compacted[global_pos]
-            freqs = self.freqs.to(raw_key.device)
-            rotated_key = apply_rope(
-                raw_key.unsqueeze(0).unsqueeze(0),
-                torch.tensor([float(logical_pos)], dtype=torch.float32, device=raw_key.device),
-                freqs,
-            ).squeeze(0).squeeze(0)
             rotated.append({
                 'token_id': token_id,
                 'raw_key': raw_key,
                 'global_pos': global_pos,
                 'logical_pos': logical_pos,
-                'key': rotated_key,
+                'key': rotated_batched[idx],
             })
         window_state.step += 1
         return {'rotated': rotated, 'index_map': compacted, 'window_state': window_state}

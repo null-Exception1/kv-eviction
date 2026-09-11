@@ -20,17 +20,26 @@ def precompute_rope_freqs(max_position: int, head_dim: int, base: float = 10000.
 
 
 def apply_rope(x: torch.Tensor, positions: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-    """Apply standard RoPE to x using the provided precomputed frequencies."""
+    """Apply standard RoPE to x using the provided precomputed frequencies.
+
+    The positions tensor can be scalar, length-N, or broadcastable across the batch
+    dimensions of x. This supports both the existing single-position use cases and
+    the batched case where each survivor has a different logical position.
+    """
     if x.shape[-1] % 2 != 0:
         raise ValueError('RoPE requires an even last dimension')
-    positions = positions.to(dtype=torch.long, device=x.device)
+
+    x = x.to(device=freqs.device if freqs.device.type != 'cpu' else x.device)
+    positions = positions.to(device=x.device, dtype=torch.long)
     if positions.ndim == 0:
         positions = positions.unsqueeze(0)
+
     angle = freqs[positions]
-    cos = torch.cos(angle).to(dtype=x.dtype).unsqueeze(0).unsqueeze(0)
-    sin = torch.sin(angle).to(dtype=x.dtype).unsqueeze(0).unsqueeze(0)
     x_even = x[..., 0::2]
     x_odd = x[..., 1::2]
+    cos = torch.cos(angle).to(dtype=x.dtype)
+    sin = torch.sin(angle).to(dtype=x.dtype)
+
     rot_even = x_even * cos - x_odd * sin
     rot_odd = x_even * sin + x_odd * cos
     return torch.stack([rot_even, rot_odd], dim=-1).flatten(-2)
