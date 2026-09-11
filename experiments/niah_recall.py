@@ -6,6 +6,7 @@ intended for a small Colab T4 run and logs one JSONL record per condition/depth.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from pathlib import Path
@@ -57,19 +58,66 @@ def make_needle_prompt(context_length: int, needle_depth: int, needle_fact: str)
     return prompt
 
 
-def generate_completion(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, prompt: str, max_new_tokens: int = 32):
-    inputs = tokenizer(prompt, return_tensors='pt')
+def build_policy_cache(model: AutoModelForCausalLM, input_ids: torch.Tensor, condition: str, window_size: int = 64, survivor_every: int = 8):
+    """Return a policy-specific cache that changes the next-token logits for the same prompt prefix."""
     with torch.no_grad():
-        output_ids = model.generate(
-            input_ids=inputs['input_ids'],
-            attention_mask=inputs.get('attention_mask'),
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-    generated = tokenizer.decode(output_ids[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
-    return generated.strip()
+        full_cache = model(input_ids=input_ids, use_cache=True).past_key_values
+    cache = copy.deepcopy(full_cache)
+    for layer in cache.layers:
+        keys = layer.keys
+        values = layer.values
+        seq_len = keys.shape[-2]
+        if condition == 'streamingllm':
+            start = max(0, seq_len - window_size)
+            keep = slice(start, seq_len)
+        elif condition == 'rsqr':
+            keep = list(range(0, seq_len, survivor_every))
+            if not keep:
+                keep = [0]
+        else:
+            raise ValueError(f'Unknown cache policy: {condition!r}')
+
+        layer.keys = keys[:, :, keep, :]
+        layer.values = values[:, :, keep, :]
+    return cache
+
+
+def generate_completion(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, prompt_or_ids, max_new_tokens: int = 32, past_key_values=None):
+    if isinstance(prompt_or_ids, str):
+        inputs = tokenizer(prompt_or_ids, return_tensors='pt')
+        prefix_ids = inputs['input_ids']
+    else:
+        prefix_ids = prompt_or_ids
+
+    if past_key_values is None:
+        inputs = tokenizer.decode(prefix_ids[0], skip_special_tokens=True) if isinstance(prefix_ids, torch.Tensor) else prompt_or_ids
+        inputs = tokenizer(inputs, return_tensors='pt')
+        with torch.no_grad():
+            output_ids = model.generate(
+                input_ids=inputs['input_ids'],
+                attention_mask=inputs.get('attention_mask'),
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.eos_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
+        generated = tokenizer.decode(output_ids[0][inputs['input_ids'].shape[1]:], skip_special_tokens=True)
+        return generated.strip()
+
+    current_ids = prefix_ids[:, -1:]
+    generated_tokens = []
+    cache = past_key_values
+    for _ in range(max_new_tokens):
+        with torch.no_grad():
+            outputs = model(input_ids=current_ids, past_key_values=cache, use_cache=True)
+        logits = outputs.logits[:, -1, :]
+        next_token = int(logits.argmax(dim=-1).item())
+        if next_token == tokenizer.eos_token_id:
+            break
+        generated_tokens.append(next_token)
+        current_ids = torch.tensor([[next_token]], device=current_ids.device, dtype=current_ids.dtype)
+        cache = outputs.past_key_values
+    return tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
 
 
 def evaluate_condition(model, tokenizer, condition: str, context_length: int, needle_depth: int, needle_fact: str, window_size: int = 64):
@@ -78,13 +126,13 @@ def evaluate_condition(model, tokenizer, condition: str, context_length: int, ne
     k_proj = capture_attention_k(model, base_ids)
     freqs = precompute_rope_freqs(2048, k_proj.shape[-1], device=torch.device('cpu'))
 
+    policy_cache = build_policy_cache(model, base_ids, condition, window_size=window_size, survivor_every=8)
+    completion = generate_completion(model, tokenizer, base_ids[:, -1:], max_new_tokens=32, past_key_values=policy_cache)
+
     if condition == 'streamingllm':
-        keep_ids = base_ids[:, -window_size:]
-        completion = generate_completion(model, tokenizer, tokenizer.decode(keep_ids[0], skip_special_tokens=True), max_new_tokens=32)
         baseline = StreamingLLMBaseline(freqs)
         _ = baseline.rotate_key(k_proj[-1], 0)
     else:
-        keep_ids = base_ids[:, -window_size:]
         shadow_cache = ShadowCache(survivor_every=8)
         selected_positions = list(range(0, min(len(k_proj), window_size), 8))
         for idx in selected_positions:
@@ -100,7 +148,6 @@ def evaluate_condition(model, tokenizer, condition: str, context_length: int, ne
             WindowState(window_size=window_size, evict_n=8),
         )
         _ = boundary['rotated']
-        completion = generate_completion(model, tokenizer, tokenizer.decode(keep_ids[0], skip_special_tokens=True), max_new_tokens=32)
 
     normalized = re.sub(r'\s+', ' ', completion).strip().lower()
     fact_normalized = re.sub(r'\s+', ' ', needle_fact).strip().lower()
