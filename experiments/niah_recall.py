@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
+import statistics
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -182,6 +185,84 @@ def evaluate_condition(model, tokenizer, condition: str, context_length: int, ne
         'fuzzy_match': fuzzy_match,
         'generated_text': completion,
         'needle_fact': needle_fact,
+    }
+
+
+def benchmark_latency(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    condition: str,
+    context_length: int,
+    needle_depth: int,
+    needle_fact: str,
+    repeat: int = 10,
+    warmup: int = 3,
+    window_size: int = 64,
+):
+    """Time repeated generate calls under the same policy harness.
+
+    This keeps the benchmark fair by measuring identical prompts, generation
+    settings, and cache policies while using a short warmup phase to reduce the
+    effect of first-run initialization noise.
+    """
+    prompt = make_needle_prompt(context_length, needle_depth, needle_fact)
+    base_ids = tokenizer(prompt, return_tensors='pt')['input_ids']
+
+    if warmup > 0:
+        for _ in range(warmup):
+            _ = generate_completion(
+                model,
+                tokenizer,
+                base_ids[:, -1:],
+                max_new_tokens=32,
+                past_key_values=build_policy_cache(model, base_ids, condition, window_size=window_size, survivor_every=8),
+            )
+
+    timings = []
+    exact_matches = []
+    fuzzy_matches = []
+
+    for _ in range(repeat):
+        start = time.perf_counter()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+        policy_cache = build_policy_cache(model, base_ids, condition, window_size=window_size, survivor_every=8)
+        completion = generate_completion(
+            model,
+            tokenizer,
+            base_ids[:, -1:],
+            max_new_tokens=32,
+            past_key_values=policy_cache,
+        )
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        elapsed = time.perf_counter() - start
+        timings.append(elapsed)
+
+        normalized = re.sub(r'\s+', ' ', completion).strip().lower()
+        fact_normalized = re.sub(r'\s+', ' ', needle_fact).strip().lower()
+        exact_match = 1.0 if fact_normalized in normalized else 0.0
+        fuzzy_match = 1.0 if fact_normalized.split()[-1] in normalized else 0.0
+        exact_matches.append(exact_match)
+        fuzzy_matches.append(fuzzy_match)
+
+    return {
+        'condition': condition,
+        'context_length': context_length,
+        'needle_depth': needle_depth,
+        'window_size': window_size,
+        'repeat': repeat,
+        'warmup': warmup,
+        'median_sec': statistics.median(timings),
+        'mean_sec': sum(timings) / len(timings),
+        'p95_sec': sorted(timings)[max(0, math.ceil(0.95 * len(timings)) - 1)],
+        'max_sec': max(timings),
+        'min_sec': min(timings),
+        'exact_match_mean': sum(exact_matches) / len(exact_matches),
+        'fuzzy_match_mean': sum(fuzzy_matches) / len(fuzzy_matches),
+        'generated_text': completion,
     }
 
 
