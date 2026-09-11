@@ -1,0 +1,9 @@
+window_size: 256
+survivor_every: 8
+evict_n: 64
+mode: rsqr
+precompute_ahead: false
+model_name: Qwen/Qwen2.5-0.5B-Instruct
+torch_dtype: float32
+head_dim: 64
+max_position: 4096
