@@ -16,11 +16,17 @@ Colab/T4 execution without re-deriving the benchmark from scratch.
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import os
+import sys
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import numpy as np
 import torch
@@ -223,45 +229,67 @@ def summarize_trials(rows: list[dict[str, Any]]):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Run the multi-fact NIAH benchmark for cache policies.")
+    parser.add_argument("--small", action="store_true", help="Use a tiny test plan for quick validation runs.")
+    parser.add_argument("--cycles", nargs="*", type=int, default=None, help="Override cycle lengths to evaluate.")
+    parser.add_argument("--seeds", nargs="*", type=int, default=None, help="Override seed values to evaluate.")
+    parser.add_argument("--trials-per-seed", type=int, default=5, help="Number of trials per (cycle, seed) pair.")
+    parser.add_argument("--window-size", type=int, default=24, help="Retention window size for the policy.")
+    parser.add_argument("--block-size", type=int, default=8, help="Block size used by the policy builder.")
+    parser.add_argument("--sink-size", type=int, default=6, help="Sink token size used by the policy builder.")
+    args = parser.parse_args()
+
     torch.set_grad_enabled(False)
     model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, torch_dtype=torch.float32, device_map="cpu")
     model.eval()
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
-    cycle_values = [2, 4, 8, 12, 16]
-    seeds = [0, 1, 2]
-    n_trials_per_seed = 5
+    if args.small:
+        cycle_values = [2]
+        seeds = [0]
+        n_trials_per_seed = 1
+        print("SMALL TEST MODE: running 1 cycle x 1 seed x 1 trial.")
+    else:
+        cycle_values = args.cycles if args.cycles is not None else [2, 4, 8, 12, 16]
+        seeds = args.seeds if args.seeds is not None else [0, 1, 2]
+        n_trials_per_seed = args.trials_per_seed
+
+    if args.small and args.trials_per_seed != 5:
+        n_trials_per_seed = args.trials_per_seed
+
+    total_trials = len(cycle_values) * len(seeds) * n_trials_per_seed
     rows: list[dict[str, Any]] = []
 
-    for n_cycles in cycle_values:
-        rng_base = np.random.default_rng(1234 + n_cycles)
-        for seed in seeds:
-            rng = np.random.default_rng(seed * 1000 + n_cycles)
-            for _ in range(n_trials_per_seed):
-                stream, fact_len, correct_number = make_multi_fact_stream_fast(rng, n_cycles, cycle_len=16, n_facts=3, sink_size=6)
-                trial = evaluate_multi_fact_trial(
-                    model,
-                    tokenizer,
-                    stream,
-                    fact_len,
-                    window_size=24,
-                    block_size=8,
-                    sink_size=6,
-                )
-                row = {
-                    "n_cycles": n_cycles,
-                    "seed": seed,
-                    "correct_number": correct_number,
-                    **trial,
-                }
-                rows.append(row)
+    with tqdm(total=total_trials, desc="NIAH trials", unit="trial") as pbar:
+        for n_cycles in cycle_values:
+            for seed in seeds:
+                rng = np.random.default_rng(seed * 1000 + n_cycles)
+                for _ in range(n_trials_per_seed):
+                    stream, fact_len, correct_number = make_multi_fact_stream_fast(rng, n_cycles, cycle_len=16, n_facts=3, sink_size=args.sink_size)
+                    trial = evaluate_multi_fact_trial(
+                        model,
+                        tokenizer,
+                        stream,
+                        fact_len,
+                        window_size=args.window_size,
+                        block_size=args.block_size,
+                        sink_size=args.sink_size,
+                    )
+                    row = {
+                        "n_cycles": n_cycles,
+                        "seed": seed,
+                        "correct_number": correct_number,
+                        **trial,
+                    }
+                    rows.append(row)
+                    pbar.update(1)
 
     summary = summarize_trials(rows)
     with open(LOG_PATH, "w", encoding="utf-8") as f:
         for row in rows:
             f.write(json.dumps(row, sort_keys=True) + "\n")
 
-    print(json.dumps({"summary": summary, "log_path": str(LOG_PATH)}, sort_keys=True, indent=2))
+    print(json.dumps({"summary": summary, "log_path": str(LOG_PATH), "n_trials": len(rows)}, sort_keys=True, indent=2))
 
 
 if __name__ == "__main__":
