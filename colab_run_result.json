@@ -1,0 +1,11 @@
+{
+  "run_name": "rsqr_colab_t4_smoke",
+  "platform": "Google Colab",
+  "gpu": "T4 or similar",
+  "status": "paste_actual_colab_output_here",
+  "timestamp_utc": "2026-09-11T00:00:00Z",
+  "trial_score": null,
+  "max_abs_diff": null,
+  "survivor_count": null,
+  "notes": "Overwrite this file with the JSON produced by the Colab notebook. Keep the same keys so it can be compared against the local package checks."
+}
