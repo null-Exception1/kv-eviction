@@ -47,7 +47,7 @@ class RSQRModelWrapper:
             device_map='cpu',
         )
         self.model.eval()
-        self.freqs = precompute_rope_freqs(4096, 64, device=torch.device('cpu'))
+        self.freqs = precompute_rope_freqs(4096, 128, device=torch.device('cpu'))
         self.shadow_cache = ShadowCache(config.survivor_every)
         self.index_map = IndexMap()
         self.eviction_manager = EvictionManager(self.freqs)
