@@ -49,16 +49,16 @@ def capture_attention_k(model: AutoModelForCausalLM, input_ids: torch.Tensor, la
 
 def make_needle_prompt(context_length: int, needle_depth: int, needle_fact: str):
     facts = []
-    for i in range(context_length):
+    for i in range(max(4, context_length)):
         if i == needle_depth:
-            facts.append(f'Fact {i}: {needle_fact}')
+            facts.append(f'Sentence {chr(65 + (i % 26))}: {needle_fact}')
         else:
-            facts.append(f'Fact {i}: the answer is not the secret fact.')
-    context = ' '.join(facts)
+            facts.append(f'Sentence {chr(65 + (i % 26))}: the answer is not the secret fact.')
+    context = '\n'.join(facts[:context_length])
     prompt = (
-        'You are given a long list of facts. Return only the exact fact that matches the secret answer.\n'
+        'You are given a short list of sentences. Return only the exact sentence that contains the secret phrase.\n'
         f'{context}\n'
-        'Question: What is the secret fact? Reply with the exact fact only.'
+        'Question: Which sentence contains the secret phrase? Reply with only that sentence.'
     )
     return prompt
 
@@ -178,7 +178,7 @@ def run_suite(output_path: str | None = None, context_lengths: list[int] | None 
 
     context_lengths = context_lengths or [64, 96]
     depths = depths or [0, 1, 2]
-    needle_fact = 'The secret answer is 42.'
+    needle_fact = 'The exact secret is BAKED-42.'
     rows = []
 
     for condition in ['streamingllm', 'rsqr']:
@@ -200,5 +200,5 @@ def run_suite(output_path: str | None = None, context_lengths: list[int] | None 
 
 
 if __name__ == '__main__':
-    rows = run_suite(output_path='rsqr_niah_results.jsonl', context_lengths=[64, 96], depths=[0, 1, 2])
+    rows = run_suite(output_path='rsqr_niah_results.jsonl', context_lengths=[8, 12, 16], depths=[0, 1, 2])
     print(json.dumps(rows[0], sort_keys=True))
