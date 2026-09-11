@@ -31,6 +31,8 @@ from src.model_wrapper import StreamingLLMBaseline
 
 def capture_attention_k(model: AutoModelForCausalLM, input_ids: torch.Tensor, layer_index: int = -1):
     """Return the real K projection tensor for the full input from the selected attention layer."""
+    device = next(model.parameters()).device
+    input_ids = input_ids.to(device)
     layer = model.model.layers[layer_index]
     captured = {}
 
@@ -80,6 +82,8 @@ def build_policy_cache(
     sliding window. RSQR keeps every survivor token via the raw-survivor index
     map, which is the same mechanism the rest of the repo uses.
     """
+    device = next(model.parameters()).device
+    input_ids = input_ids.to(device)
     with torch.no_grad():
         full_cache = model(input_ids=input_ids, use_cache=True).past_key_values
     cache = copy.deepcopy(full_cache)
@@ -106,15 +110,17 @@ def build_policy_cache(
 
 
 def generate_completion(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, prompt_or_ids, max_new_tokens: int = 32, past_key_values=None):
+    device = next(model.parameters()).device
+
     if isinstance(prompt_or_ids, str):
-        inputs = tokenizer(prompt_or_ids, return_tensors='pt')
+        inputs = tokenizer(prompt_or_ids, return_tensors='pt').to(device)
         prefix_ids = inputs['input_ids']
     else:
-        prefix_ids = prompt_or_ids
+        prefix_ids = prompt_or_ids.to(device)
 
     if past_key_values is None:
         inputs = tokenizer.decode(prefix_ids[0], skip_special_tokens=True) if isinstance(prefix_ids, torch.Tensor) else prompt_or_ids
-        inputs = tokenizer(inputs, return_tensors='pt')
+        inputs = tokenizer(inputs, return_tensors='pt').to(device)
         with torch.no_grad():
             output_ids = model.generate(
                 input_ids=inputs['input_ids'],
@@ -145,7 +151,7 @@ def generate_completion(model: AutoModelForCausalLM, tokenizer: AutoTokenizer, p
 
 def evaluate_condition(model, tokenizer, condition: str, context_length: int, needle_depth: int, needle_fact: str, window_size: int = 64):
     prompt = make_needle_prompt(context_length, needle_depth, needle_fact)
-    base_ids = tokenizer(prompt, return_tensors='pt')['input_ids']
+    base_ids = tokenizer(prompt, return_tensors='pt')['input_ids'].to(next(model.parameters()).device)
     k_proj = capture_attention_k(model, base_ids)
     freqs = precompute_rope_freqs(2048, k_proj.shape[-1], device=torch.device('cpu'))
 
@@ -206,7 +212,7 @@ def benchmark_latency(
     effect of first-run initialization noise.
     """
     prompt = make_needle_prompt(context_length, needle_depth, needle_fact)
-    base_ids = tokenizer(prompt, return_tensors='pt')['input_ids']
+    base_ids = tokenizer(prompt, return_tensors='pt')['input_ids'].to(next(model.parameters()).device)
 
     if warmup > 0:
         for _ in range(warmup):
